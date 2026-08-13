@@ -2,92 +2,169 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>US English Speech Flow — Local</title>
+    <title>US English Speech Flow — 比对与评分</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width: 800px; margin: 2rem auto; }
-      textarea { width: 100%; height: 120px; }
-      #results { white-space: pre-wrap; background: #f7f7f7; padding: 1rem; margin-top: 1rem; }
-      button { margin-right: 8px; }
+      body { font-family: Inter, Arial, sans-serif; max-width: 900px; margin: 2rem auto; color:#222; background:#f6f8fa; }
+      .card { background:#fff; border-radius:10px; padding:1.25rem 1.5rem; box-shadow:0 8px 30px rgba(15,23,42,0.06); margin-bottom:1rem; }
+      textarea { width:100%; height:120px; padding:10px; border-radius:8px; border:1px solid #e6eef6; resize:vertical; font-size:14px }
+      .controls { display:flex; gap:.5rem; align-items:center; margin-top:.75rem; flex-wrap:wrap; }
+      button { padding:.55rem .85rem; border-radius:8px; border:0; background:#2563eb; color:#fff; cursor:pointer; font-weight:600 }
+      button.secondary { background:#64748b }
+      button.ghost { background:transparent; color:#2563eb; border:1px solid #cbd5e1 }
+      #results { white-space:pre-wrap; margin-top:1rem; }
+      .ref-words { line-height:2; margin-top:8px }
+      .ref-words span { padding:6px 8px; margin:4px 4px; border-radius:8px; display:inline-block; font-size:15px }
+      .correct { background: #e6ffed; color:#04663b; }      /* light green */
+      .missing { background: #fff7db; color:#7a4f00; }      /* yellow (漏读) */
+      .wrong { background: #ffecec; color:#7a0b0b; }        /* red (读错) */
+      .transcript { margin-top:.75rem; color:#334155; font-size:15px }
+      .score { font-size:1.15rem; font-weight:700 }
+      .play-controls { display:flex; gap:.5rem; align-items:center; margin-top:.5rem }
+      .meta { color:#475569; font-size:13px }
+      .footer-note { color:#64748b; font-size:13px; margin-top:8px }
     </style>
   </head>
   <body>
-    <h1>US English Speech Flow — Local</h1>
-    <p>Paste the reference text you will read, press Record, read it aloud, then Stop and Upload.</p>
+    <h1 style="margin-bottom:.2rem">US English Speech Flow — 比对与评分</h1>
+    <div class="card">
+      <label><strong>参考文本 (Paste the reference text here)</strong></label>
+      <textarea id="reference" placeholder="Paste the text you will read here..."></textarea>
 
-    <label>Reference text</label>
-    <textarea id="reference" placeholder="Paste the text you will read here..."></textarea>
+      <div class="controls">
+        <button id="recordBtn">Start Recording</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="uploadBtn" class="secondary" disabled>Upload & Compare</button>
 
-    <div style="margin-top: 1rem">
-      <button id="recordBtn">Start Recording</button>
-      <button id="stopBtn" disabled>Stop</button>
-      <button id="uploadBtn" disabled>Upload</button>
-      <span id="status"></span>
+        <button id="playUserBtn" class="secondary" disabled>Play Your Recording</button>
+        <button id="playTTSBtn" class="ghost">Play Standard US Male (TTS)</button>
+
+        <div style="margin-left:auto; text-align:right">
+          <div class="score" id="score">准确率: —</div>
+          <div id="stats" class="meta"></div>
+        </div>
+      </div>
+
+      <div id="status" style="margin-top:.5rem; color:#475569"></div>
+      <div class="footer-note">提示：若浏览器没有可用的 en-US 男声，TTS 会选用系统默认 en-US 语音。要获得固定真人男声，可后续集成付费 TTS 服务。</div>
     </div>
 
-    <h3>Transcript & Suggestions</h3>
-    <div id="results">Nothing yet.</div>
+    <div class="card">
+      <h3 style="margin-top:0">Reference vs Transcript</h3>
+      <div class="ref-words" id="refWords"></div>
+      <div class="transcript" id="transcriptArea"></div>
+    </div>
 
     <script>
-      let mediaRecorder;
-      let recordedBlobs = [];
+      // Simple diff function (good enough for many short-read cases). We'll keep backend diff as a future improvement.
+      function simpleDiffWords(ref, hyp) {
+        const rWords = ref.trim().split(/\s+/).filter(Boolean);
+        const hWords = hyp.trim().split(/\s+/).filter(Boolean);
+        let i=0,j=0; const result = [];
+        while(i<rWords.length || j<hWords.length) {
+          const r = rWords[i] || null; const h = hWords[j] || null;
+          if (r === h) { result.push({ type:'equal', ref:r, hyp:h }); i++; j++; }
+          else {
+            // lookahead small window
+            if (h && rWords.slice(i+1, i+4).includes(h)) { result.push({ type:'deletion', ref:r }); i++; }
+            else if (r && hWords.slice(j+1, j+4).includes(r)) { result.push({ type:'insertion', hyp:h }); j++; }
+            else { result.push({ type:'substitution', ref:r||'', hyp:h||'' }); i++; j++; }
+          }
+        }
+        return result;
+      }
+
+      let mediaRecorder, recordedBlobs = [], userBlob = null;
       const recordBtn = document.getElementById('recordBtn');
       const stopBtn = document.getElementById('stopBtn');
       const uploadBtn = document.getElementById('uploadBtn');
       const status = document.getElementById('status');
-      const results = document.getElementById('results');
+      const refEl = document.getElementById('reference');
+      const refWordsEl = document.getElementById('refWords');
+      const transcriptArea = document.getElementById('transcriptArea');
+      const playUserBtn = document.getElementById('playUserBtn');
+      const playTTSBtn = document.getElementById('playTTSBtn');
+      const scoreEl = document.getElementById('score');
+      const statsEl = document.getElementById('stats');
 
       recordBtn.onclick = async () => {
         recordedBlobs = [];
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
           mediaRecorder = new MediaRecorder(stream);
-          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedBlobs.push(e.data); };
+          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size>0) recordedBlobs.push(e.data); };
           mediaRecorder.start();
-          recordBtn.disabled = true; stopBtn.disabled = false; uploadBtn.disabled = true;
-          status.textContent = 'Recording...';
-        } catch (e) {
-          alert('Microphone access denied or not available.');
-        }
+          recordBtn.disabled=true; stopBtn.disabled=false; uploadBtn.disabled=true;
+          status.textContent='Recording...';
+        } catch(e) { alert('无法访问麦克风，请检查权限。'); }
       };
 
       stopBtn.onclick = () => {
-        if (mediaRecorder) {
-          mediaRecorder.stop();
-          mediaRecorder.stream.getTracks().forEach(t => t.stop());
-        }
-        recordBtn.disabled = false; stopBtn.disabled = true; uploadBtn.disabled = false;
+        if (mediaRecorder) { mediaRecorder.stop(); mediaRecorder.stream.getTracks().forEach(t=>t.stop()); }
+        userBlob = new Blob(recordedBlobs, { type:'audio/webm' });
+        playUserBtn.disabled = false;
+        recordBtn.disabled=false; stopBtn.disabled=true; uploadBtn.disabled=false;
         status.textContent = 'Recording stopped.';
       };
 
-      uploadBtn.onclick = async () => {
-        const ref = document.getElementById('reference').value.trim();
-        if (!ref) { alert('Please paste the reference text first.'); return; }
-        if (recordedBlobs.length === 0) { alert('No recording found.'); return; }
-
-        const blob = new Blob(recordedBlobs, { type: 'audio/webm' });
-        const fd = new FormData();
-        fd.append('file', blob, 'speech.webm');
-        fd.append('referenceText', ref);
-
-        status.textContent = 'Uploading... transcribing...';
-        results.textContent = '';
-        try {
-          const resp = await fetch('/api/evaluate', { method: 'POST', body: fd });
-          const data = await resp.json();
-          if (data.error) {
-            results.textContent = 'Error: ' + JSON.stringify(data.error);
-          } else {
-            let out = 'Transcript:\n' + (data.transcript || '(empty)') + '\n\n';
-            out += 'Suggestions:\n';
-            (data.suggestions || []).forEach(s => { out += '- ' + s.message + '\n'; });
-            results.textContent = out;
-          }
-        } catch (e) {
-          results.textContent = 'Upload error: ' + e.message;
-        } finally {
-          status.textContent = '';
-        }
+      playUserBtn.onclick = () => {
+        if (!userBlob) return; const url = URL.createObjectURL(userBlob); const audio = new Audio(url); audio.play();
       };
+
+      playTTSBtn.onclick = () => {
+        const text = refEl.value.trim(); if (!text) { alert('请先粘贴参考文本。'); return; }
+        if (!('speechSynthesis' in window)) { alert('本浏览器不支持 SpeechSynthesis。'); return; }
+        const utter = new SpeechSynthesisUtterance(text);
+        const voices = speechSynthesis.getVoices();
+        // Prefer en-US male-like voice by name heuristics
+        let voice = voices.find(v => /en[-_]?us/i.test(v.lang) && /(male|mark|david|matt|john|alex|daniel)/i.test(v.name));
+        if (!voice) voice = voices.find(v => /en[-_]?us/i.test(v.lang));
+        if (voice) utter.voice = voice;
+        utter.rate = 1.0; utter.pitch = 1.0; speechSynthesis.speak(utter);
+      };
+
+      uploadBtn.onclick = async () => {
+        const ref = refEl.value.trim(); if (!ref) { alert('请先粘贴参考文本'); return; }
+        if (!userBlob) { alert('没有录音'); return; }
+        status.textContent = '上传并转写中...'; uploadBtn.disabled = true;
+        try {
+          const fd = new FormData(); fd.append('file', userBlob, 'speech.webm'); fd.append('referenceText', ref);
+          const resp = await fetch('/api/evaluate', { method:'POST', body:fd });
+          const data = await resp.json(); if (data.error) { status.textContent = '错误: ' + JSON.stringify(data.error); return; }
+          const transcript = (data.transcript||'').trim(); transcriptArea.textContent = '识别结果：' + transcript;
+          const diffs = simpleDiffWords(ref, transcript);
+          renderDiffs(diffs); computeScore(diffs);
+          status.textContent = '完成';
+        } catch (e) { status.textContent = '上传错误: ' + e.message; }
+        finally { uploadBtn.disabled = false; }
+      };
+
+      function renderDiffs(diffs) {
+        refWordsEl.innerHTML = '';
+        diffs.forEach(piece => {
+          if (piece.type === 'equal') {
+            const s = document.createElement('span'); s.className='correct'; s.textContent = piece.ref; refWordsEl.appendChild(s);
+          } else if (piece.type === 'deletion') {
+            const s = document.createElement('span'); s.className='missing'; s.textContent = piece.ref; s.title = '你漏读了这个词'; refWordsEl.appendChild(s);
+          } else if (piece.type === 'substitution') {
+            const s = document.createElement('span'); s.className='wrong'; s.textContent = piece.ref; s.title = '你读成了: ' + (piece.hyp || ''); refWordsEl.appendChild(s);
+          } else if (piece.type === 'insertion') {
+            const s = document.createElement('span'); s.className='wrong'; s.textContent = '(额外: ' + piece.hyp + ')'; s.style.fontStyle='italic'; refWordsEl.appendChild(s);
+          }
+          refWordsEl.appendChild(document.createTextNode(' '));
+        });
+      }
+
+      function computeScore(diffs) {
+        let totalRef = 0, correct=0;
+        diffs.forEach(p => {
+          if (p.type === 'equal') { totalRef++; correct++; }
+          else if (p.type === 'deletion') { totalRef++; }
+          else if (p.type === 'substitution') { totalRef++; }
+          else if (p.type === 'insertion') { /* insertion is extra hyp word */ }
+        });
+        if (totalRef === 0) { scoreEl.textContent = '准确率: —'; statsEl.textContent = ''; }
+        else { const pct = Math.round((correct/totalRef)*1000)/10; scoreEl.textContent = `准确率: ${pct}%`; statsEl.textContent = `正确 ${correct} / ${totalRef} 词 (${pct}%)`; }
+      }
     </script>
   </body>
 </html>
