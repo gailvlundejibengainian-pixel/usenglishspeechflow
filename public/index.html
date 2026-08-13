@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>US English Speech Flow — Local</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 800px; margin: 2rem auto; }
+      textarea { width: 100%; height: 120px; }
+      #results { white-space: pre-wrap; background: #f7f7f7; padding: 1rem; margin-top: 1rem; }
+      button { margin-right: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>US English Speech Flow — Local</h1>
+    <p>Paste the reference text you will read, press Record, read it aloud, then Stop and Upload.</p>
+
+    <label>Reference text</label>
+    <textarea id="reference" placeholder="Paste the text you will read here..."></textarea>
+
+    <div style="margin-top: 1rem">
+      <button id="recordBtn">Start Recording</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="uploadBtn" disabled>Upload</button>
+      <span id="status"></span>
+    </div>
+
+    <h3>Transcript & Suggestions</h3>
+    <div id="results">Nothing yet.</div>
+
+    <script>
+      let mediaRecorder;
+      let recordedBlobs = [];
+      const recordBtn = document.getElementById('recordBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const uploadBtn = document.getElementById('uploadBtn');
+      const status = document.getElementById('status');
+      const results = document.getElementById('results');
+
+      recordBtn.onclick = async () => {
+        recordedBlobs = [];
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedBlobs.push(e.data); };
+          mediaRecorder.start();
+          recordBtn.disabled = true; stopBtn.disabled = false; uploadBtn.disabled = true;
+          status.textContent = 'Recording...';
+        } catch (e) {
+          alert('Microphone access denied or not available.');
+        }
+      };
+
+      stopBtn.onclick = () => {
+        if (mediaRecorder) {
+          mediaRecorder.stop();
+          mediaRecorder.stream.getTracks().forEach(t => t.stop());
+        }
+        recordBtn.disabled = false; stopBtn.disabled = true; uploadBtn.disabled = false;
+        status.textContent = 'Recording stopped.';
+      };
+
+      uploadBtn.onclick = async () => {
+        const ref = document.getElementById('reference').value.trim();
+        if (!ref) { alert('Please paste the reference text first.'); return; }
+        if (recordedBlobs.length === 0) { alert('No recording found.'); return; }
+
+        const blob = new Blob(recordedBlobs, { type: 'audio/webm' });
+        const fd = new FormData();
+        fd.append('file', blob, 'speech.webm');
+        fd.append('referenceText', ref);
+
+        status.textContent = 'Uploading... transcribing...';
+        results.textContent = '';
+        try {
+          const resp = await fetch('/api/evaluate', { method: 'POST', body: fd });
+          const data = await resp.json();
+          if (data.error) {
+            results.textContent = 'Error: ' + JSON.stringify(data.error);
+          } else {
+            let out = 'Transcript:\n' + (data.transcript || '(empty)') + '\n\n';
+            out += 'Suggestions:\n';
+            (data.suggestions || []).forEach(s => { out += '- ' + s.message + '\n'; });
+            results.textContent = out;
+          }
+        } catch (e) {
+          results.textContent = 'Upload error: ' + e.message;
+        } finally {
+          status.textContent = '';
+        }
+      };
+    </script>
+  </body>
+</html>
