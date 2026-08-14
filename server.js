@@ -32,66 +32,74 @@ const upload = multer({ storage });
 app.post('/api/evaluate', upload.single('file'), async (req, res) => {
   try {
     const referenceText = req.body.referenceText || '';
-    if (!req.file) return res.status(400).json({ error: 'No audio file uploaded' });
+
+    // Basic validations
+    if (!req.file) {
+      console.error('No file in request (req.file is undefined). req.body keys:', Object.keys(req.body));
+      return res.status(400).json({ error: 'No audio file uploaded' });
+    }
+
+    // Log file info
+    const filePath = req.file.path;
+    const stat = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
+    console.log('Received upload:', filePath, 'size=', stat ? stat.size : 'n/a');
+
+    if (!stat || stat.size === 0) {
+      try { if (stat) fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
+      console.error('Uploaded file is empty or missing, aborting.');
+      return res.status(400).json({ error: { message: 'Uploaded file is empty', type: 'invalid_request_error' } });
+    }
+
     if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: 'GROQ_API_KEY not set in environment' });
 
     // Send to Groq Whisper
     const form = new FormData();
-    form.append('file', fs.createReadStream(req.file.path));
+    form.append('file', fs.createReadStream(filePath));
     form.append('model', 'whisper-large-v3');
 
-    const groqRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
-      headers: {
-        ...form.getHeaders(),
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
+    let groqRes;
+    try {
+      groqRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      });
+    } catch (err) {
+      console.error('Error calling Groq API:', err?.response?.data || err.message || err);
+      // cleanup
+      try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
+      return res.status(500).json({ error: err?.response?.data || err.message || 'Groq transcription error' });
+    }
 
     const groqData = groqRes.data || {};
-    // Groq/Whisper may return text in different fields; try common ones
     const transcript = groqData.text || groqData.transcript || groqData?.data?.text || '';
 
     // Word-level diff
     const diffs = diffWords(referenceText.trim(), transcript.trim());
-    // Build a compact list of mismatches
     const mismatches = [];
-    let refIndex = 0;
-    let hypIndex = 0;
 
     diffs.forEach(part => {
       const text = (part.value || '').trim();
       if (!text) return;
       const words = text.split(/\s+/).filter(Boolean);
       if (part.added) {
-        // words that were inserted in hypothesis
         mismatches.push({ type: 'insertion', words });
-        hypIndex += words.length;
       } else if (part.removed) {
-        // words removed from hypothesis (i.e., missing)
         mismatches.push({ type: 'deletion', words });
-        refIndex += words.length;
-      } else {
-        // unchanged
-        refIndex += words.length;
-        hypIndex += words.length;
       }
     });
 
-    // Simple suggestions: for deletions and insertions show expected vs actual
-    const suggestions = mismatches.map((m, i) => {
-      if (m.type === 'deletion') {
-        return { message: `Missing words: \"${m.words.join(' ')}\"` };
-      } else if (m.type === 'insertion') {
-        return { message: `Extra words spoken: \"${m.words.join(' ')}\"` };
-      } else {
-        return { message: `Mismatch: ${JSON.stringify(m)}` };
-      }
+    const suggestions = mismatches.map((m) => {
+      if (m.type === 'deletion') return { message: `Missing words: "${m.words.join(' ')}"` };
+      if (m.type === 'insertion') return { message: `Extra words spoken: "${m.words.join(' ')}"` };
+      return { message: `Mismatch: ${JSON.stringify(m)}` };
     });
 
     // Cleanup uploaded file
-    try { fs.unlinkSync(req.file.path); } catch (e) { /* ignore */ }
+    try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
 
     res.json({ transcript, diffs, suggestions });
   } catch (err) {
