@@ -4,18 +4,24 @@ This is a minimal personal project to record/upload short spoken clips, transcri
 
 WARNING: Do NOT commit your API keys into this repository. Use environment variables as shown below.
 
-## Setup (local)
+## Setup (local / Codespaces)
 
-1. Copy .env.example to `.env` and add your Groq API key:
+1. Create a local .env from the example (run once):
+
+   npm run init
+
+   This copies `.env.example` to `.env` if `.env` does not already exist.
+
+2. Edit `.env` and add your Groq API key:
 
    GROQ_API_KEY=your_real_groq_api_key_here
 
-2. Install and run:
+3. Install and run:
 
    npm install
    npm start
 
-3. Open http://localhost:3000 in your browser.
+4. Open http://localhost:3000 in your browser (or use Codespaces forwarded port).
 
 ## How it works
 
